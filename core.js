@@ -49,6 +49,10 @@
   .eks-warn{color:#b42318;font-weight:900}
   .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;}
   .eks-tree{display:flex;gap:8px;flex-wrap:wrap}
+  .eks-tree button{white-space:nowrap}
+  #tab-tree .eks-card{position:relative}
+  #tab-tree .eks-row{align-items:center}
+
   .eks-tree button{padding:6px 10px;border-radius:999px}
   `;
   const st = document.createElement("style");
@@ -102,6 +106,26 @@
     a.href = url; a.download = filename;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(url), 600);
+  };
+
+
+  const makeRng = (seedStr) => {
+    // Deterministic RNG if seed provided; otherwise use Math.random
+    const s = String(seedStr||"").trim();
+    if (!s) return {rand: Math.random, shuffle: (arr)=>arr.sort(()=>Math.random()-0.5)};
+    // xmur3 + sfc32
+    function xmur3(str){ for(var i=0,h=1779033703^str.length;i<str.length;i++) h=Math.imul(h^str.charCodeAt(i),3432918353),h=h<<13|h>>>19; return function(){h=Math.imul(h^h>>>16,2246822507);h=Math.imul(h^h>>>13,3266489909); return (h^=h>>>16)>>>0;};}
+    function sfc32(a,b,c,d){ return function(){ a>>>0;b>>>0;c>>>0;d>>>0; var t=(a+b)|0; a=b^b>>>9; b=c+(c<<3)|0; c=(c<<21|c>>>11); d=d+1|0; t=t+d|0; c=c+t|0; return (t>>>0)/4294967296; } }
+    const seed = xmur3(s);
+    const rand = sfc32(seed(), seed(), seed(), seed());
+    const shuffle = (arr)=>{
+      for (let i=arr.length-1;i>0;i--){
+        const j = Math.floor(rand()*(i+1));
+        [arr[i],arr[j]] = [arr[j],arr[i]];
+      }
+      return arr;
+    };
+    return {rand, shuffle};
   };
 
   const addReject = (rej, reason, example) => {
@@ -199,6 +223,11 @@
           el("select",{class:"eks-sel", id:"ckVaryB"})
         ),
         fieldSelect("Parity","parity",["on","off"],"on"),
+        fieldSelect("Randomize","randomize",["on","off"],"on"),
+        el("div",{class:"eks-field sm"},
+          el("label",{class:"eks-label"},"Seed (optional)"),
+          el("input",{class:"eks-in mono", id:"seed", value:""})
+        ),
         fieldSelect("Hide bittings","hideBittings",["off","on"],"off"),
       ),
       el("div",{class:"eks-btnbar"},
@@ -223,7 +252,13 @@
     const treePanel = el("div",{id:"tab-tree"},
       el("div",{class:"eks-card"},
         el("h2",{style:"margin:0 0 8px;font-size:14px"},"Hierarchy"),
-        el("div",{class:"eks-muted", style:"margin-bottom:10px"},"Click TMK / MK to filter outputs."),
+        el("div",{class:"eks-muted", style:"margin-bottom:10px"},"Filter outputs by MK (mobile-friendly)."),
+        el("div",{class:"eks-row", style:"margin-bottom:10px"},
+          el("div",{class:"eks-field sm"},
+            el("label",{class:"eks-label", for:"filterSelect"},"Filter"),
+            el("select",{class:"eks-sel", id:"filterSelect"})
+          )
+        ),
         el("div",{class:"eks-tree", id:"treeButtons"}),
         el("div",{id:"treeInfo", class:"eks-muted", style:"margin-top:10px"})
       )
@@ -289,6 +324,9 @@
     const mkCount = Number($("#mkCount").value);
     const ckPerMk = Number($("#ckPerMk").value);
     const parityOn = $("#parity").value === "on";
+    const randomizeOn = $("#randomize").value === "on";
+    const rng = makeRng($("#seed").value);
+
 
     const tmk = parseBitting($("#tmk").value, pc);
     if (!tmk){
@@ -325,7 +363,7 @@
     for (const mv of mkVaryCandidates){
       for (const [aIdx,bIdx] of ckPairs){
         for (const mode of modes){
-          const attempt = tryBuild({tmk, ds, macs, step, parityOn, mv, aIdx, bIdx, mkCount, ckPerMk, doorCount, Avals:stepAlign(mode.A), Bvals:stepAlign(mode.B)});
+          const attempt = tryBuild({tmk, ds, macs, step, parityOn, randomizeOn, rng, mv, aIdx, bIdx, mkCount, ckPerMk, doorCount, Avals:stepAlign(mode.A), Bvals:stepAlign(mode.B)});
           if (attempt.ok){ best = {...attempt, mv, aIdx, bIdx, modeName:mode.name}; break; }
           addReject(state.rejects, attempt.reason, attempt.example);
         }
@@ -351,9 +389,11 @@
     renderAll();
   }
 
-  function tryBuild({tmk, ds, macs, step, parityOn, mv, aIdx, bIdx, mkCount, ckPerMk, doorCount, Avals, Bvals}){
+  function tryBuild({tmk, ds, macs, step, parityOn, randomizeOn, rng, mv, aIdx, bIdx, mkCount, ckPerMk, doorCount, Avals, Bvals}){
     const mks=[]; const used=new Set();
     const cand = ds.filter(v=> step===1 || (v%step)===0);
+    if (randomizeOn) rng.shuffle(cand);
+
 
     for (const v of cand){
       if (mks.length>=mkCount) break;
@@ -432,15 +472,30 @@
       sum.innerHTML = `<span class="eks-pill">TMK</span> <span class="mono">${maybeHide(fmt(state.tmk))}</span>
         &nbsp; <span class="eks-pill">MK</span> ${state.mks.length}
         &nbsp; <span class="eks-pill">Doors</span> ${state.cks.length}
-        &nbsp; <span class="eks-pill">Filter</span> ${state.filter.level}${state.filter.mkSym?(" "+state.filter.mkSym):""}`;
+        &nbsp; <span class="eks-pill">Filter</span> ${state.filter.level==="TMK" ? "All" : state.filter.mkSym}`;
     }
 
     const tree = $("#treeButtons");
     const info = $("#treeInfo");
+    const fsel = $("#filterSelect");
     if (tree){
       tree.innerHTML="";
+      if (fsel) fsel.innerHTML="";
       if (!state.tmk){ info.textContent=""; }
       else{
+        if (fsel){
+          const addOpt = (val, label)=>{
+            const o=document.createElement("option"); o.value=val; o.textContent=label; fsel.appendChild(o);
+          };
+          addOpt("TMK","All (TMK)");
+          state.mks.forEach(mk=>addOpt(mk.sym, mk.sym));
+          fsel.value = state.filter.level==="TMK" ? "TMK" : (state.filter.mkSym||"TMK");
+          fsel.onchange = ()=>{
+            const v=fsel.value;
+            state.filter = (v==="TMK") ? {level:"TMK", mkSym:null} : {level:"MK", mkSym:v};
+            renderAll();
+          };
+        }
         const mkBtn = (label, active, fn) => el("button",{class:`eks-btn ${active?"":"sec"}`, style:"padding:6px 10px;font-size:12px", onclick:fn}, label);
         tree.appendChild(mkBtn("TMK (All)", state.filter.level==="TMK", ()=>{state.filter={level:"TMK", mkSym:null}; renderAll();}));
         state.mks.forEach(mk=>{
